@@ -75,3 +75,183 @@ INSERT INTO customer_orders(order_id, customer_id, roll_id, not_include_items, e
     (1, 101, 1, '', '', '2021-01-01 18:05:02'),
     (2, 101, 1, '', '', '2021-01-01 19:00:52'),
     (3, 102, 1, '', 'NaN', '2021-01-02 23:51:23');
+```
+
+## Business Problems and Solutions
+
+### Problem 1: Identifying Roll Popularity Trends
+**Objective:** Understand which types of rolls (veg or non-veg) are most popular among customers.
+
+**Solution:** Analyze the order data to find the most frequently ordered roll types.
+```sql
+SELECT r.roll_name, COUNT(co.roll_id) AS order_count
+FROM customer_orders co
+JOIN rolls r ON co.roll_id = r.roll_id
+GROUP BY r.roll_name
+ORDER BY order_count DESC;
+```
+
+### Problem 2: Reducing Order Cancellations
+**Objective:** Identify drivers with high cancellation rates to improve delivery reliability.
+
+**Solution:** Calculate the percentage of cancellations for each driver and suggest targeted interventions.
+```sql
+SELECT driver_id, 
+       COUNT(order_id) AS total_orders,
+       SUM(CASE WHEN cancellation IS NOT NULL AND cancellation != '' THEN 1 ELSE 0 END) AS cancellations,
+       (SUM(CASE WHEN cancellation IS NOT NULL AND cancellation != '' THEN 1 ELSE 0 END) * 100.0 / COUNT(order_id)) AS cancellation_rate
+FROM driver_order
+GROUP BY driver_id
+ORDER BY cancellation_rate DESC;
+```
+
+### Problem 3: Forecasting Future Ingredient Demand
+**Objective:** Predict future ingredient requirements using time-series analysis of past usage trends.
+
+**Solution:** Generate projections based on monthly ingredient usage data.
+```sql
+WITH MonthlyIngredientUsage AS (
+    SELECT 
+        i.ingredients_name, 
+        DATEPART(YEAR, co.order_date) AS order_year, 
+        DATEPART(MONTH, co.order_date) AS order_month,
+        COUNT(*) AS usage_count
+    FROM customer_orders co
+    JOIN rolls_recipes rr ON co.roll_id = rr.roll_id
+    JOIN ingredients i ON ',' || rr.ingredients || ',' LIKE '%,' || CAST(i.ingredients_id AS VARCHAR) || ',%'
+    WHERE co.order_id IN (
+        SELECT order_id FROM driver_order WHERE cancellation IS NULL OR cancellation = ''
+    )
+    GROUP BY i.ingredients_name, DATEPART(YEAR, co.order_date), DATEPART(MONTH, co.order_date)
+)
+SELECT ingredients_name, order_year, order_month, usage_count, 
+       AVG(usage_count) OVER (PARTITION BY ingredients_name ORDER BY order_year, order_month ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS projected_demand
+FROM MonthlyIngredientUsage
+ORDER BY ingredients_name, order_year, order_month;
+```
+
+### Problem 4: Ingredient Demand Prediction
+**Objective:** Forecast ingredient demand based on past orders for efficient inventory management.
+
+**Solution:** Calculate the frequency of each ingredient in completed orders.
+```sql
+SELECT i.ingredients_name, COUNT(*) AS usage_count
+FROM customer_orders co
+JOIN rolls_recipes rr ON co.roll_id = rr.roll_id
+JOIN ingredients i ON ',' || rr.ingredients || ',' LIKE '%,' || CAST(i.ingredients_id AS VARCHAR) || ',%'
+WHERE co.order_id IN (
+    SELECT order_id FROM driver_order WHERE cancellation IS NULL OR cancellation = ''
+)
+GROUP BY i.ingredients_name
+ORDER BY usage_count DESC;
+```
+
+### Problem 5: Peak Order Times
+**Objective:** Identify peak times for orders to optimize staffing and resource allocation.
+
+**Solution:** Analyze the distribution of orders by time of day.
+```sql
+SELECT DATEPART(HOUR, order_date) AS order_hour, COUNT(order_id) AS order_count
+FROM customer_orders
+GROUP BY DATEPART(HOUR, order_date)
+ORDER BY order_hour;
+```
+
+### Problem 6: Identifying Drivers with Exceptional Performance
+**Objective:** Recognize drivers who consistently deliver faster than average across comparable distances.
+
+**Solution:** Benchmark driver performance against average delivery times.
+```sql
+WITH DistanceBenchmarks AS (
+    SELECT distance, AVG(CAST(duration AS FLOAT)) AS avg_duration
+    FROM driver_order
+    WHERE cancellation IS NULL OR cancellation = ''
+    GROUP BY distance
+)
+SELECT do.driver_id, do.distance, AVG(CAST(do.duration AS FLOAT)) AS avg_driver_duration, 
+       db.avg_duration AS benchmark_duration, 
+       (db.avg_duration - AVG(CAST(do.duration AS FLOAT))) AS performance_gap
+FROM driver_order do
+JOIN DistanceBenchmarks db ON do.distance = db.distance
+WHERE cancellation IS NULL OR cancellation = ''
+GROUP BY do.driver_id, do.distance, db.avg_duration
+HAVING AVG(CAST(do.duration AS FLOAT)) < db.avg_duration
+ORDER BY performance_gap DESC;
+```
+
+### Problem 7: Monitoring Customer Order Frequency Changes
+**Objective:** Identify customers whose ordering patterns have significantly changed over time.
+
+**Solution:** Analyze changes in monthly order frequency for each customer.
+```sql
+WITH MonthlyOrders AS (
+    SELECT customer_id, 
+           DATEPART(YEAR, order_date) AS order_year, 
+           DATEPART(MONTH, order_date) AS order_month, 
+           COUNT(order_id) AS order_count
+    FROM customer_orders
+    GROUP BY customer_id, DATEPART(YEAR, order_date), DATEPART(MONTH, order_date)
+),
+OrderChanges AS (
+    SELECT customer_id, order_year, order_month, order_count,
+           LAG(order_count) OVER (PARTITION BY customer_id ORDER BY order_year, order_month) AS prev_order_count
+    FROM MonthlyOrders
+)
+SELECT customer_id, order_year, order_month, prev_order_count, order_count, 
+       (order_count - prev_order_count) AS order_change
+FROM OrderChanges
+WHERE prev_order_count IS NOT NULL
+ORDER BY ABS(order_change) DESC;
+```
+
+
+### Problem 8: Revenue Analysis by Roll Type
+**Objective:** Calculate total revenue generated by each roll type to identify high-performing items.
+
+**Solution:** Sum the revenues grouped by roll type.
+```sql
+SELECT r.roll_name, SUM(price) AS total_revenue
+FROM customer_orders co
+JOIN rolls r ON co.roll_id = r.roll_id
+JOIN pricing p ON co.roll_id = p.roll_id
+GROUP BY r.roll_name
+ORDER BY total_revenue DESC;
+```
+
+### Problem 9: Average Order Size
+**Objective:** Determine the average number of rolls per order to gauge customer purchasing behavior.
+
+**Solution:** Calculate the average rolls ordered per order.
+```sql
+SELECT AVG(order_size) AS avg_order_size
+FROM (
+    SELECT order_id, COUNT(roll_id) AS order_size
+    FROM customer_orders
+    GROUP BY order_id
+) AS subquery;
+```
+
+### Problem 10: Driver Workload Distribution
+**Objective:** Evaluate how workload is distributed among drivers to improve resource allocation.
+
+**Solution:** Count the number of orders handled by each driver.
+```sql
+SELECT driver_id, COUNT(order_id) AS orders_handled
+FROM driver_order
+WHERE cancellation IS NULL OR cancellation = ''
+GROUP BY driver_id
+ORDER BY orders_handled DESC;
+```
+
+## Outcomes
+The project results provided insights into roll order patterns, driver performance, customer preferences, and ingredient optimization opportunities. Key findings include:
+1. High demand for certain roll types.
+2. Drivers' performance metrics for completed orders.
+3. Patterns in order customization requests by customers.
+4. Ingredient demand trends for inventory planning.
+5. Peak order times for operational efficiency.
+6. Identification of loyal customers.
+7. Delivery efficiency insights by distance.
+8. Revenue contributions by roll type.
+9. Average order size trends.
+10. Workload distribution among drivers.
